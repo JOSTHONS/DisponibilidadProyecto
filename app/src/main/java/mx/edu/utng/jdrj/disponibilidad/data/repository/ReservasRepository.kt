@@ -13,96 +13,70 @@ class ReservasRepository {
     private val db = FirebaseFirestore.getInstance()
     private val collection = db.collection(Constants.COLLECTION_RESERVAS)
 
-    // --- USUARIO NORMAL ---
-
+    // --- CRUD BÁSICO (Sin cambios) ---
     suspend fun crearReserva(reserva: Reserva): Result<Boolean> {
         return try {
             val errorConflicto = verificarDisponibilidadInteligente(reserva)
-            if (errorConflicto != null) {
-                return Result.failure(Exception(errorConflicto))
-            }
-
+            if (errorConflicto != null) return Result.failure(Exception(errorConflicto))
             val docRef = collection.document()
             val nuevaReserva = reserva.copy(idReserva = docRef.id, timestamp = System.currentTimeMillis())
             docRef.set(nuevaReserva).await()
             Result.success(true)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        } catch (e: Exception) { Result.failure(e) }
     }
 
     suspend fun obtenerMisReservas(usuarioId: String): List<Reserva> {
         return try {
             val snapshot = collection.whereEqualTo("idUsuario", usuarioId).get().await()
             snapshot.toObjects(Reserva::class.java).sortedByDescending { it.timestamp }
-        } catch (e: Exception) {
-            emptyList()
-        }
+        } catch (e: Exception) { emptyList() }
     }
 
-    // --- NUEVO: OBTENER TODO EL HISTORIAL (PARA ESTADÍSTICAS) ---
     suspend fun obtenerTodasLasReservas(): List<Reserva> {
         return try {
-            // Descargamos TODO para procesarlo en la app (conteo, gráficas, etc.)
             val snapshot = collection.get().await()
             snapshot.toObjects(Reserva::class.java)
-        } catch (e: Exception) {
-            Log.e("ReservasRepo", "Error al obtener estadísticas", e)
-            emptyList()
-        }
+        } catch (e: Exception) { emptyList() }
     }
 
-    // --- LÓGICA MAESTRA DE INVENTARIO ---
+    suspend fun eliminarReservaDefinitivamente(idReserva: String): Result<Boolean> {
+        return try {
+            collection.document(idReserva).delete().await()
+            Result.success(true)
+        } catch (e: Exception) { Result.failure(e) }
+    }
+
+    suspend fun cancelarReserva(idReserva: String): Result<Boolean> {
+        return rechazarReserva(idReserva, "Cancelada por el usuario")
+    }
+
+    // --- VALIDACIONES (Sin cambios) ---
     private suspend fun verificarDisponibilidadInteligente(nueva: Reserva): String? {
         try {
-            val snapshot = collection
-                .whereEqualTo("idEspacio", nueva.idEspacio)
-                .whereEqualTo("fecha", nueva.fecha)
-                .get().await()
-
-            val reservasDelDia = snapshot.toObjects(Reserva::class.java)
-                .filter { it.estado != Constants.ESTADO_CANCELADA }
-
+            val snapshot = collection.whereEqualTo("idEspacio", nueva.idEspacio).whereEqualTo("fecha", nueva.fecha).get().await()
+            val reservasDelDia = snapshot.toObjects(Reserva::class.java).filter { it.estado != Constants.ESTADO_CANCELADA }
             val inicioNuevo = convertirHoraAMinutos(nueva.horaInicio)
             val finNuevo = convertirHoraAMinutos(nueva.horaFin)
-
             val reservasEnConflicto = reservasDelDia.filter { r ->
                 val inicioExistente = convertirHoraAMinutos(r.horaInicio)
                 val finExistente = convertirHoraAMinutos(r.horaFin)
                 (inicioNuevo < finExistente) && (inicioExistente < finNuevo)
             }
 
-            // CASO 1: AULA COMPLETA
             if (nueva.equiposReservados.isEmpty()) {
-                if (reservasEnConflicto.isNotEmpty()) {
-                    return "El espacio o sus equipos ya están ocupados en este horario."
-                }
+                if (reservasEnConflicto.isNotEmpty()) return "El espacio o sus equipos ya están ocupados en este horario."
                 return null
-            }
-
-            // CASO 2: RESERVA DE EQUIPOS
-            else {
-                if (reservasEnConflicto.any { it.equiposReservados.isEmpty() }) {
-                    return "El aula está reservada completa para un evento/clase."
-                }
-
+            } else {
+                if (reservasEnConflicto.any { it.equiposReservados.isEmpty() }) return "El aula está reservada completa para un evento/clase."
                 for (itemNuevo in nueva.equiposReservados) {
                     var cantidadOcupada = 0
                     for (reservaExistente in reservasEnConflicto) {
                         val itemEncontrado = reservaExistente.equiposReservados.find { it.idEquipo == itemNuevo.idEquipo }
-                        if (itemEncontrado != null) {
-                            cantidadOcupada += itemEncontrado.cantidad
-                        }
+                        if (itemEncontrado != null) cantidadOcupada += itemEncontrado.cantidad
                     }
-
-                    val relacionQuery = db.collection(Constants.COLLECTION_ESPACIO_EQUIPAMIENTO)
-                        .whereEqualTo("idEspacio", nueva.idEspacio)
-                        .whereEqualTo("idEquipo", itemNuevo.idEquipo)
-                        .get().await()
-
+                    val relacionQuery = db.collection(Constants.COLLECTION_ESPACIO_EQUIPAMIENTO).whereEqualTo("idEspacio", nueva.idEspacio).whereEqualTo("idEquipo", itemNuevo.idEquipo).get().await()
                     val relacion = relacionQuery.toObjects(EspacioEquipamiento::class.java).firstOrNull()
                     val capacidadTotal = relacion?.cantidad ?: 0
-
                     if ((cantidadOcupada + itemNuevo.cantidad) > capacidadTotal) {
                         val disponibles = capacidadTotal - cantidadOcupada
                         return "No hay suficientes '${itemNuevo.nombreEquipo}'. (Pides ${itemNuevo.cantidad}, quedan $disponibles)."
@@ -110,10 +84,7 @@ class ReservasRepository {
                 }
                 return null
             }
-
-        } catch (e: Exception) {
-            return "Error al verificar disponibilidad: ${e.message}"
-        }
+        } catch (e: Exception) { return "Error al verificar disponibilidad: ${e.message}" }
     }
 
     private fun convertirHoraAMinutos(horaTexto: String): Int {
@@ -129,19 +100,6 @@ class ReservasRepository {
             }
             return (horas * 60) + minutos
         } catch (e: Exception) { return 0 }
-    }
-
-    // --- RESTO DE FUNCIONES ---
-
-    suspend fun eliminarReservaDefinitivamente(idReserva: String): Result<Boolean> {
-        return try {
-            collection.document(idReserva).delete().await()
-            Result.success(true)
-        } catch (e: Exception) { Result.failure(e) }
-    }
-
-    suspend fun cancelarReserva(idReserva: String): Result<Boolean> {
-        return rechazarReserva(idReserva, "Cancelada por el usuario")
     }
 
     suspend fun obtenerReservasPorEspacioYFecha(idEspacio: String, fecha: String): List<Reserva> {
@@ -172,15 +130,34 @@ class ReservasRepository {
         } catch (e: Exception) { Result.failure(e) }
     }
 
-    fun escucharCambiosMisReservas(idUsuario: String, onModificacion: (Reserva) -> Unit) {
-        collection.whereEqualTo("idUsuario", idUsuario).addSnapshotListener { snapshot, _ ->
-            snapshot?.documentChanges?.forEach { if (it.type == DocumentChange.Type.MODIFIED) onModificacion(it.document.toObject(Reserva::class.java)) }
-        }
+    // --- NOTIFICACIONES MEJORADAS (AHORA PASAMOS EL TIPO DE CAMBIO) ---
+
+    // Escucha inteligente para ALUMNOS: Pasamos la Reserva y QUÉ LE PASÓ (Agregada, Modificada, Borrada)
+    fun escucharCambiosMisReservas(idUsuario: String, onCambio: (Reserva, DocumentChange.Type) -> Unit) {
+        collection.whereEqualTo("idUsuario", idUsuario)
+            .addSnapshotListener { snapshot, _ ->
+                snapshot?.documentChanges?.forEach { change ->
+                    // Convertimos a objeto (Cuidado con REMOVED, a veces da null si no se maneja bien, pero Firestore suele guardar el oldDocument)
+                    try {
+                        val reserva = change.document.toObject(Reserva::class.java)
+                        onCambio(reserva, change.type)
+                    } catch (e: Exception) {
+                        Log.e("ReservasRepo", "Error al procesar cambio", e)
+                    }
+                }
+            }
     }
 
+    // Escucha inteligente para ADMIN (Solo nuevas solicitudes)
     fun escucharNuevasSolicitudes(onNueva: (Reserva) -> Unit) {
-        collection.whereEqualTo("estado", Constants.ESTADO_PENDIENTE).addSnapshotListener { snapshot, _ ->
-            snapshot?.documentChanges?.forEach { if (it.type == DocumentChange.Type.ADDED) onNueva(it.document.toObject(Reserva::class.java)) }
-        }
+        collection.whereEqualTo("estado", Constants.ESTADO_PENDIENTE)
+            .addSnapshotListener { snapshot, _ ->
+                snapshot?.documentChanges?.forEach { change ->
+                    if (change.type == DocumentChange.Type.ADDED) {
+                        val reserva = change.document.toObject(Reserva::class.java)
+                        onNueva(reserva)
+                    }
+                }
+            }
     }
 }
