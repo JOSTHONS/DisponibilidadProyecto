@@ -349,7 +349,7 @@ fun AppNavigation() {
 }
 </details>
 ```
-<details> <summary><b>🐘 build.gradle.kts (Module: app)</b></summary>
+<details> <summary><b>🐘 build.gradle.kts: Todos los plugins y extenciones que necesita el proyecto (Module: app)</b></summary>
 
 Kotlin
 
